@@ -1,0 +1,147 @@
+Feature Engineering Examples
+
+Import Libraries
+import pandas as pd
+import matplotlib.pyplot as plt
+import datetime
+import requests
+import io
+import csv
+import numpy as np
+Load Dataset
+# Pass in the path to the training set csv file you downloaded
+
+df = pd.read_csv('training_set_v1.csv')
+df.shape
+df.head()
+df['CUSTOMER_ID'].nunique()
+df['SUBSCRIBED'].value_counts()
+Impute New Features
+datetime.date.today().year
+df['AGE'] = datetime.date.today().year - df['BIRTH_YEAR']
+df.head()
+df['NUM_WEB_PURCHASES'].hist()
+df['NUM_WEB_PURCHASES'].describe()
+def web_purchase_bin(x):
+    if x < 88:
+        return 1
+    elif 88 <= x <= 107:
+        return 2
+    elif 108 <= x <= 128:
+        return 3
+    elif x >= 129:
+        return 4
+df['NUM_WEB_PURCHASES_BIN'] = df['NUM_WEB_PURCHASES'].apply(lambda x: web_purchase_bin(x))
+df['NUM_WEB_PURCHASES_BIN'].isnull().sum()
+df.head()
+df['NUM_WEB_PURCHASES_BIN'].hist()
+APIs
+df.head()
+! pip install pygeocodio
+from geocodio import GeocodioClient
+
+geocodio_api = 'YOUR API KEY'
+client = GeocodioClient(geocodio_api)
+df['FULL_ADDRESS'] = df['ADDRESS1'] + ' ' + df['CITY'] + ' ' + df['STATE'] + ' ' + df['ZIPCODE'].astype(str)
+df.dropna(subset=['FULL_ADDRESS'], inplace=True)
+# format for API
+
+api_dict = {}
+
+for index, row in df.iterrows():
+    api_dict[str(row['CUSTOMER_ID'])] = row['FULL_ADDRESS']
+len(api_dict)
+api_dict
+geocoded_addresses = client.geocode(api_dict, None, fields=['census2022','acs-demographics', 'acs-social', 'acs-families'])
+geocoded_addresses['63631443']['results'][0]
+def percent_family(customer_id):
+    # census data doesn't have 100% coverage, return null if missing this field
+    try:
+        return geocoded_addresses[customer_id]['results'][0]['fields']['acs']['families']['Household type by household']['Family households']['percentage']
+    except:
+        return np.nan
+def percent_female_bachelor(customer_id):
+    # census data doesn't have 100% coverage, return null if missing this field
+    try:
+        return geocoded_addresses[customer_id]['results'][0]['fields']['acs']['social']['Population by minimum level of education']["Female: Bachelor's degree"]['percentage']
+    except:
+        return np.nan
+df['PERCENT_FAMILY'] = df['CUSTOMER_ID'].apply(lambda x: percent_family(str(x)))
+df['PERCENT_FEMALE_BACHELOR'] = df['CUSTOMER_ID'].apply(lambda x: percent_female_bachelor(str(x)))
+# check coverage
+print((df['PERCENT_FAMILY'].isnull().sum()/df.shape[0]) * 100)
+print((df['PERCENT_FEMALE_BACHELOR'].isnull().sum()/df.shape[0]) * 100)
+df.head()
+Public Alternative
+! pip install urllib3==1.26.15 requests-toolbelt==0.10.1
+! pip install censusgeocode
+df.head()
+census_df = df[['ADDRESS1', 'CITY', 'STATE', 'ZIPCODE']]
+census_df.head()
+# save as CSV file
+census_df.to_csv('census_df.csv', header=False)
+import censusgeocode
+
+cg = censusgeocode.CensusGeocode(benchmark='Public_AR_Current',vintage='Current_Current')
+k = cg.addressbatch('census_df.csv')
+
+# Bonus
+# Get clean output in Dataframe
+
+df_output = pd.DataFrame(k, columns=k[0].keys())
+df_output.head()
+df_output['match'].value_counts()
+! pip install census
+from census import Census
+
+api_key = 'YOUR US CENSUS API KEY'
+c = Census(api_key)
+# https://api.census.gov/data/2022/acs/acs1/variables.html
+# percent family household = 'B11016_002E'/ 'B11016_001E'
+
+variable_to_extract = "B11016_002E,B11016_001E"
+
+resp = c.acs5.get(fields=('NAME', variable_to_extract),
+           geo={'for': 'zip code tabulation area:*'}, 
+           year=2021)
+resp
+# create zipcode: percent_family lookup dictionary
+
+cleaned_dict = {}
+
+for dictionary in resp:
+    zipcode = dictionary['zip code tabulation area']
+    total_households = dictionary["B11016_001E"]
+    family_households = dictionary["B11016_002E"]
+    if total_households != 0:
+        percent_family = family_households/total_households
+        cleaned_dict[zipcode] = percent_family 
+    else:
+        cleaned_dict[zipcode] = np.nan 
+    
+cleaned_dict
+df['ZIPCODE'] = df['ZIPCODE'].astype(str)
+df['ZIPCODE'] = df['ZIPCODE'].apply(lambda x: '0'+x if len(x)==4 else x)
+df['PERCENT_FAMILY_USCENSUS'] = df['ZIPCODE'].apply(lambda x: cleaned_dict[x])
+df.head()
+Correlation?
+def gen_corr_grid(df, depvar):
+    corr_dict = {
+            'variable': [],
+            'corr': []
+        }
+    for col in list(df.columns):
+        if df[col].dtype not in ['object', '<M8[ns]'] and col != depvar :
+            r = df[depvar].corr(df[col])   
+            corr_dict['variable'].append(col)
+            corr_dict['corr'].append(r)
+    return pd.DataFrame(corr_dict).sort_values(by=['corr'], ascending=False)
+
+
+df_corrs = gen_corr_grid(df[['CD_GENDER', 'CD_CREDIT_RATING', 'HD_INCOME_BAND_SK',\
+                             'AVG_DOLLAR_ITEM', 'WEB_RETURN_RATE', 'AGE', 'NUM_WEB_PURCHASES_BIN',\
+                             'PERCENT_FAMILY', 'PERCENT_FEMALE_BACHELOR', 'PERCENT_FAMILY_USCENSUS', 'SUBSCRIBED']],
+                         'SUBSCRIBED')
+df_corrs.head(20)
+ 
+ 

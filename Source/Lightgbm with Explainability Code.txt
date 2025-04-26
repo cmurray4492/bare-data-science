@@ -1,0 +1,210 @@
+Install the libraries you need
+
+! pip install lightgbm
+! pip install shap
+# Import all the libraries you'll be using
+
+import pandas as pd
+import numpy as np
+import math
+import seaborn as sns
+import matplotlib as plt
+from datetime import date
+import datetime
+from sklearn import metrics
+from sklearn.model_selection import StratifiedShuffleSplit
+import lightgbm as lgb
+from sklearn.model_selection import GridSearchCV
+import boto3
+import datetime
+from sklearn.model_selection import train_test_split
+import shap
+
+
+%matplotlib inline
+
+pd.set_option('display.max_columns', None)
+pd.set_option('display.max_rows', None)
+Data Collection
+# Load dataset provided from Kaggle
+# We merge the the training and test dataset for now, as we'll run QA and transformations on all the data
+
+df_train = pd.read_csv('job change of data scientists/aug_train.csv')
+df_test = pd.read_csv('job change of data scientists/aug_test.csv')
+df = pd.concat([df_train, df_test])
+# Size of the data
+df.shape
+# Checkout the features
+df.head()
+Data Exploration
+df.shape
+# Unique on enrollee id
+
+df['enrollee_id'].nunique() == df.shape[0]
+# Any person duplicates?
+
+df['duplicated'] = df.drop(columns = ['enrollee_id']).duplicated()
+df['duplicated'].value_counts()
+df.drop(df[df['duplicated'] == True].index, inplace = True)
+df.head(2)
+print(f'New df size is {df.shape}')
+# Descriptive stats
+
+df.describe()
+# Check unique and null counts, does everything look as expected?
+
+for col in df.columns:
+    print(f' \n {col.upper()} contains {df[col].nunique()} unique values and {df[col].isnull().sum()} nulls')
+# Drop unlabeled target rows
+
+df.dropna(subset=['target'], how='all', inplace=True)
+print(df.shape[0])
+      
+df['target'].value_counts()
+df['company_size'].value_counts()
+# Tidy up 10/49 to 10-49
+
+df['company_size'] = df['company_size'].apply(lambda x: '10-49' if x == '10/49' else x)
+df['company_size'].value_counts()
+# Training hours distribution
+
+df['training_hours'].hist()
+# Seaborn example
+
+sns.violinplot(data=df, x="education_level", y="training_hours", hue="target", gridsize = 200)
+Feature Engineering
+df.head()
+# Are classes balanced?
+
+df['target'].value_counts()
+# Total number of nulls in dataset
+
+df.isnull().sum()
+Data Transformation
+df.head()
+# Drop columns we don't want to pass to model
+
+df_model = df.drop(['duplicated', 'enrollee_id'], axis=1)
+# Any categorical columns require numeric indicator variables (i.e. pandas dummies)
+
+
+cat_cols = []
+
+for col in df_model.columns:
+    print('\n')
+    print(f'Column {col} is of data type {df_model[col].dtype}')   
+    if df_model[col].dtype == 'object':
+        print('Creating dummies for it')
+        cat_cols.append(col)
+df_model = pd.get_dummies(df_model, columns=cat_cols)
+# Target col should be int 0 or 1
+
+df_model['target'] = pd.to_numeric(df_model['target'])
+df_model['target'] = df_model['target'].astype(int)
+df_model['target'].value_counts()
+# Ensure dummies look good
+
+df_model.head()
+# See what features are most correlated to the dependent variable
+# How should we interpret this?
+
+def gen_corr_grid(df, depvar):
+    corr_dict = {
+            'variable': [],
+            'corr': []
+        }
+    for col in list(df.columns):
+        if df[col].dtype not in ['object', '<M8[ns]'] and col != depvar :
+            r = df[depvar].corr(df[col])   
+            corr_dict['variable'].append(col)
+            corr_dict['corr'].append(r)
+    return pd.DataFrame(corr_dict).sort_values(by=['corr'], ascending=False)
+
+
+df_corrs = gen_corr_grid(df_model, 'target')
+df_corrs.head(20)
+Create training and test data to pass to the model
+# 80/20 split
+train, test = train_test_split(df_model, test_size=0.2)
+
+# Breakout identifies the feature cols so we break out our x (features) and y (target col) values in next cell
+breakout = list(set(train.columns) - set(['target']))
+def split_x_y(test_in, train_in, breakout, depvar):
+     
+
+    train = train_in.copy()
+    test = test_in.copy()
+
+    X_train = train[breakout].copy()
+    X_test = test[breakout].copy()
+    
+    y_train = train[depvar]
+    y_test = test[depvar]
+        
+    X_columns = X_train.columns
+    
+        
+    return X_train, X_test, y_train, y_test, X_columns
+X_train, X_test, y_train, y_test, X_columns = split_x_y(test, train, breakout, 'target')
+# Confirm 80/20 split
+
+print(X_train.shape)
+print(y_train.shape)
+print(X_test.shape)
+print(y_test.shape)
+Model Training
+# Generate 5 splits
+
+cv_sss = StratifiedShuffleSplit(n_splits=5, test_size=0.2, random_state=77)
+# Train the model
+
+def fit_lgb(param_grid, X, y, cv):
+    
+    gbm = lgb.LGBMClassifier(objective='binary',
+                            feature_fraction= 0.9)
+    
+    grid_search = GridSearchCV(gbm, 
+                               param_grid=param_grid,
+                               scoring='roc_auc',
+                               cv=cv,
+                               verbose=1,
+                              n_jobs=-1)   
+    
+    grid_search.fit(X=X, y=y.values.ravel())
+    
+    print(grid_search.best_score_)
+    print(grid_search.best_estimator_)
+    print(grid_search.best_params_)
+    return grid_search
+# You can test out other hyperparameter values to see if it improves performance
+
+param_grid = { 'learning_rate': [0.05],
+                'n_estimators': [400],
+                'max_depth': [5, 7],
+                'min_child_samples': [50, 200, 600],
+                'num_leaves': [31, 63] }
+
+grid_search = fit_lgb(param_grid, X_train, y_train, cv_sss)
+Evaluation
+# Pass test data to our trained model. 
+
+y_pred = grid_search.best_estimator_.predict_proba(X_test)[:,1]
+auc = metrics.roc_auc_score(y_true=y_test, y_score=y_pred)
+print(auc)
+
+fi = pd.Series(grid_search.best_estimator_.feature_importances_, index=X_columns).sort_values(ascending=False)
+fi
+Explainability
+# Using SHAP values
+# Fit the explainer
+explainer = shap.Explainer(grid_search.best_estimator_.predict, X_test)
+# Calculates the SHAP values - this takes some time
+shap_values = explainer(X_test)
+# Features ordered from highest to lowest impact on prediction
+
+shap.plots.bar(shap_values)
+# How do higher/lower values of each feature affect the prediction?
+
+shap.summary_plot(shap_values, plot_size = (12,12), max_display = 30)
+ 
+ 
